@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleDollarSign,
+  ExternalLink,
   FileText,
   Gauge,
   Image as ImageIcon,
@@ -14,10 +15,13 @@ import {
   Play,
   ReceiptText,
   RefreshCcw,
+  ShieldAlert,
   Sparkles,
   Upload,
   Wallet,
 } from "lucide-react";
+import { createPublicClient, createWalletClient, custom, erc20Abi, formatUnits, http, parseUnits } from "viem";
+import { baseSepolia } from "viem/chains";
 import type {
   Artifact,
   CampaignDraft,
@@ -40,7 +44,36 @@ type LiveEntry = {
 };
 
 type TapeStatus = "pending" | "confirmed" | "failed";
-type StageId = "brief" | "review" | "launch" | "results";
+type StageId = "fund" | "brief" | "review" | "launch" | "results";
+
+interface EthereumProvider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+}
+
+declare global {
+  interface Window {
+    ethereum?: EthereumProvider;
+  }
+}
+
+type FundWalletKind = "demo" | "real";
+
+interface FundWallet {
+  kind: FundWalletKind;
+  address: `0x${string}`;
+  balanceUsdc: number;
+}
+
+interface TreasuryInfo {
+  treasuryAddress: `0x${string}` | null;
+  usdcAddress: `0x${string}` | null;
+  chainId: number;
+  explorerBase: string;
+  onchainAvailable: boolean;
+}
+
+const DEMO_WALLET_BALANCE_USDC = 100;
+const BASE_SEPOLIA_RPC_URL = "https://sepolia.base.org";
 
 const VIDEO_POLL_INTERVAL_MS = 10_000;
 
@@ -150,6 +183,26 @@ function chipClass(status?: string): string {
 
 function formatMoney(value: number): string {
   return `$${value.toFixed(2)}`;
+}
+
+function truncateAddress(address: string): string {
+  if (address.length <= 12) return address;
+  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
+function randomDemoAddress(): `0x${string}` {
+  const bytes = Array.from({ length: 20 }, () => Math.floor(Math.random() * 256));
+  return `0x${bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")}` as `0x${string}`;
+}
+
+function randomFakeTxHash(): `0x${string}` {
+  const bytes = Array.from({ length: 32 }, () => Math.floor(Math.random() * 256));
+  return `0x${bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")}` as `0x${string}`;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return "Something went wrong.";
 }
 
 function timeStamp(): string {
@@ -338,20 +391,32 @@ export function CampaignStudio({ initialMode }: Props) {
   const [running, setRunning] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [launchError, setLaunchError] = useState<string | null>(null);
-  const [activeStage, setActiveStage] = useState<StageId>("brief");
+  const [activeStage, setActiveStage] = useState<StageId>("fund");
   const [visibleStages, setVisibleStages] = useState<Record<StageId, boolean>>({
-    brief: true,
+    fund: true,
+    brief: false,
     review: false,
     launch: false,
     results: false,
   });
 
   const sectionRefs = useRef<Record<StageId, HTMLElement | null>>({
+    fund: null,
     brief: null,
     review: null,
     launch: null,
     results: null,
   });
+
+  const [treasuryInfo, setTreasuryInfo] = useState<TreasuryInfo | null>(null);
+  const [fundWallet, setFundWallet] = useState<FundWallet | null>(null);
+  const [onchainToggle, setOnchainToggle] = useState(false);
+  const [fundAmount, setFundAmount] = useState<string>(String(draft.budgetUsdc));
+  const [treasuryFundedUsdc, setTreasuryFundedUsdc] = useState(0);
+  const [fundTxHash, setFundTxHash] = useState<string | null>(null);
+  const [fundError, setFundError] = useState<string | null>(null);
+  const [connectingWallet, setConnectingWallet] = useState(false);
+  const [fundingInProgress, setFundingInProgress] = useState(false);
 
   const proposals = plan?.proposalPack.proposals ?? [];
   const wallets = plan?.proposalPack.wallets ?? [];
@@ -370,7 +435,17 @@ export function CampaignStudio({ initialMode }: Props) {
     [plan?.questions, questionAnswers],
   );
   const tapeEntries = liveFeed.slice(-16).reverse();
-  const artifactPreview = artifacts.slice(0, 6);
+  const artifactPreview = useMemo(() => {
+    // Collapse the repetitive placement_plan wave updates down to the latest one,
+    // and float the video/image to the front, so a flood of placement waves can
+    // never push the generated creative out of the artifacts strip.
+    const latestPlacementPlan = artifacts.find((artifact) => artifact.type === "placement_plan");
+    const curated = artifacts.filter(
+      (artifact) => artifact.type !== "placement_plan" || artifact === latestPlacementPlan,
+    );
+    const rank = (artifact: Artifact) => (artifact.type === "video" ? 0 : artifact.type === "image" ? 1 : 2);
+    return [...curated].sort((left, right) => rank(left) - rank(right)).slice(0, 6);
+  }, [artifacts]);
 
   const activeWallets = useMemo(() => {
     return wallets.map((wallet) => {
@@ -441,8 +516,14 @@ export function CampaignStudio({ initialMode }: Props) {
   const launchReady = Boolean(plan && budgetCheck?.ok && !running);
   const acceptedCount = proposals.filter((proposal) => accepted[proposal.agent] !== false).length;
   const summaryReference = summary ?? latestRun?.summary ?? null;
-  const stageOrder: StageId[] = ["brief", "review", "launch", "results"];
+  const stageOrder: StageId[] = ["fund", "brief", "review", "launch", "results"];
   const stageState = {
+    fund: {
+      label: "Fund",
+      subtitle: "Connect a wallet and fund the treasury",
+      unlocked: true,
+      ready: treasuryFundedUsdc > 0,
+    },
     brief: {
       label: "Brief",
       subtitle: "Capture the campaign ask",
@@ -472,6 +553,24 @@ export function CampaignStudio({ initialMode }: Props) {
   useEffect(() => {
     void refreshAudit();
   }, []);
+
+  useEffect(() => {
+    async function loadTreasuryInfo() {
+      try {
+        const response = await fetch("/api/treasury");
+        if (!response.ok) return;
+        const data = (await response.json()) as TreasuryInfo;
+        setTreasuryInfo(data);
+      } catch {
+        // The Fund stage still works in emulated mode without treasury info.
+      }
+    }
+    void loadTreasuryInfo();
+  }, []);
+
+  useEffect(() => {
+    setDraft((current) => ({ ...current, mode: onchainToggle ? "onchain-single" : "mock" }));
+  }, [onchainToggle]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -588,6 +687,115 @@ export function CampaignStudio({ initialMode }: Props) {
       setRuns(data.runs);
     } catch {
       // Keep the page usable even if audit storage is unavailable.
+    }
+  }
+
+  async function readUsdcBalance(address: `0x${string}`): Promise<number> {
+    if (!treasuryInfo?.usdcAddress) return 0;
+    const publicClient = createPublicClient({
+      chain: baseSepolia,
+      transport: http(BASE_SEPOLIA_RPC_URL),
+    });
+    const balance = await publicClient.readContract({
+      address: treasuryInfo.usdcAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [address],
+    });
+    return Number(formatUnits(balance, 6));
+  }
+
+  async function connectRealWallet() {
+    setFundError(null);
+
+    if (typeof window === "undefined" || !window.ethereum) {
+      setFundError("No injected wallet found. Install MetaMask, or use the demo wallet instead.");
+      return;
+    }
+
+    setConnectingWallet(true);
+    try {
+      const walletClient = createWalletClient({
+        chain: baseSepolia,
+        transport: custom(window.ethereum),
+      });
+      const [address] = await walletClient.requestAddresses();
+      if (!address) {
+        setFundError("No account was returned by the wallet.");
+        return;
+      }
+      const balanceUsdc = await readUsdcBalance(address);
+      setFundWallet({ kind: "real", address, balanceUsdc });
+    } catch (error) {
+      setFundError(getErrorMessage(error));
+    } finally {
+      setConnectingWallet(false);
+    }
+  }
+
+  function useDemoWallet() {
+    setFundError(null);
+    setFundWallet({ kind: "demo", address: randomDemoAddress(), balanceUsdc: DEMO_WALLET_BALANCE_USDC });
+  }
+
+  async function fundTreasury() {
+    setFundError(null);
+    if (!fundWallet) {
+      setFundError("Connect a wallet before funding the treasury.");
+      return;
+    }
+
+    const amount = Number(fundAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setFundError("Enter a funding amount greater than zero.");
+      return;
+    }
+    if (amount > fundWallet.balanceUsdc) {
+      setFundError("Amount exceeds the connected wallet balance.");
+      return;
+    }
+
+    const useOnchain = onchainToggle && fundWallet.kind === "real";
+
+    if (!useOnchain) {
+      const fakeTxHash = randomFakeTxHash();
+      setFundWallet((current) => (current ? { ...current, balanceUsdc: current.balanceUsdc - amount } : current));
+      setTreasuryFundedUsdc((current) => current + amount);
+      setFundTxHash(fakeTxHash);
+      return;
+    }
+
+    if (!treasuryInfo?.treasuryAddress || !treasuryInfo?.usdcAddress) {
+      setFundError("Treasury address is not configured on the server yet.");
+      return;
+    }
+    if (typeof window === "undefined" || !window.ethereum) {
+      setFundError("No injected wallet found for the on-chain transfer.");
+      return;
+    }
+
+    setFundingInProgress(true);
+    try {
+      const walletClient = createWalletClient({
+        chain: baseSepolia,
+        transport: custom(window.ethereum),
+      });
+      const hash = await walletClient.writeContract({
+        account: fundWallet.address,
+        chain: baseSepolia,
+        address: treasuryInfo.usdcAddress,
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: [treasuryInfo.treasuryAddress, parseUnits(fundAmount, 6)],
+      });
+      setFundTxHash(hash);
+      setTreasuryFundedUsdc((current) => current + amount);
+      const refreshedBalance = await readUsdcBalance(fundWallet.address);
+      setFundWallet((current) => (current ? { ...current, balanceUsdc: refreshedBalance } : current));
+    } catch (error) {
+      setFundError(getErrorMessage(error));
+    } finally {
+      setFundingInProgress(false);
     }
   }
 
@@ -855,7 +1063,7 @@ export function CampaignStudio({ initialMode }: Props) {
           </div>
 
           <div className="hero-actions">
-            <button type="button" className="hero-cta" onClick={() => jumpToStage("brief")}>
+            <button type="button" className="hero-cta" onClick={() => jumpToStage("fund")}>
               Enter the Studio
               <ArrowRight size={18} />
             </button>
@@ -948,7 +1156,7 @@ export function CampaignStudio({ initialMode }: Props) {
           </div>
         </div>
 
-        <button type="button" className="hero-scrollcue" onClick={() => jumpToStage("brief")}>
+        <button type="button" className="hero-scrollcue" onClick={() => jumpToStage("fund")}>
           <span>Scroll to begin</span>
           <ChevronDown size={16} />
         </button>
@@ -974,6 +1182,10 @@ export function CampaignStudio({ initialMode }: Props) {
             <span className="chip">
               <LockKeyhole size={14} />
               <strong>{draft.mode}</strong>
+            </span>
+            <span className={treasuryFundedUsdc > 0 ? "chip chip-emerald" : "chip"}>
+              <Wallet size={14} />
+              <strong>{treasuryFundedUsdc > 0 ? `funded ${formatMoney(treasuryFundedUsdc)}` : "not funded"}</strong>
             </span>
             <span className="chip chip-amber">
               <Wallet size={14} />
@@ -1011,6 +1223,186 @@ export function CampaignStudio({ initialMode }: Props) {
         </nav>
 
         <div className="studio-story">
+          <section
+            ref={(node) => {
+              sectionRefs.current.fund = node;
+            }}
+            className="panel studio-chapter studio-chapter-hero"
+            data-stage-id="fund"
+            data-visible={visibleStages.fund}
+            data-active={activeStage === "fund"}
+          >
+            <div className="panel-header studio-panel-header">
+              <div>
+                <p className="eyebrow">Act 0 — Fund</p>
+                <h2>Connect a wallet and fund the treasury</h2>
+                <p>Connect a wallet, check the USDC balance, then move funds into the campaign treasury before the brief.</p>
+              </div>
+              <div className="button-row">
+                {fundError ? (
+                  <span className="chip chip-rose">{fundError}</span>
+                ) : (
+                  <span className={treasuryFundedUsdc > 0 ? "chip chip-emerald" : "chip"}>
+                    {treasuryFundedUsdc > 0 ? `treasury funded ${formatMoney(treasuryFundedUsdc)}` : "treasury unfunded"}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="panel-body">
+              <div className="studio-hero-grid">
+                <div className="studio-form">
+                  <div className="fund-wallet-actions">
+                    <button type="button" className="button button-primary" onClick={connectRealWallet} disabled={connectingWallet}>
+                      <Wallet size={16} />
+                      {connectingWallet ? "Connecting..." : "Connect wallet"}
+                    </button>
+                    <button type="button" className="button button-quiet" onClick={useDemoWallet}>
+                      <Sparkles size={16} />
+                      Use demo wallet
+                    </button>
+                  </div>
+
+                  {fundWallet ? (
+                    <div className="fund-wallet-card">
+                      <div className="studio-inline-head">
+                        <span className="eyebrow">Connected wallet</span>
+                        <span className={fundWallet.kind === "real" ? "chip chip-cyan" : "chip"}>
+                          {fundWallet.kind === "real" ? "on-chain" : "demo"}
+                        </span>
+                      </div>
+                      <div className="fund-wallet-meta">
+                        <span className="mono">{truncateAddress(fundWallet.address)}</span>
+                        <strong>{formatMoney(fundWallet.balanceUsdc)} USDC</strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="hint">
+                      No wallet connected yet. Use MetaMask (or another injected wallet) for a real Base Sepolia balance, or
+                      use the demo wallet to try the flow without one.
+                    </p>
+                  )}
+
+                  <div className="fund-toggle-card">
+                    <div className="studio-inline-head">
+                      <span className="eyebrow">Go on-chain</span>
+                      <button
+                        type="button"
+                        className="toggle"
+                        data-active={onchainToggle}
+                        onClick={() => setOnchainToggle((current) => !current)}
+                      >
+                        {onchainToggle ? "On-chain (real)" : "Emulated"}
+                      </button>
+                    </div>
+                    <p className="hint">
+                      Emulated funding just moves numbers around so the demo always works. Switching this on sends a real
+                      USDC transfer on Base Sepolia from the connected wallet — this requires a connected (non-demo) wallet
+                      and real testnet USDC.
+                    </p>
+                    {onchainToggle ? (
+                      <p className="fund-risk-note">
+                        <ShieldAlert size={14} />
+                        Real testnet USDC will leave the connected wallet. Only use Base Sepolia test funds.
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="studio-field-grid">
+                    <div className="field">
+                      <label htmlFor="fund-amount">Amount to fund (USDC)</label>
+                      <input
+                        id="fund-amount"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={fundAmount}
+                        onChange={(event) => setFundAmount(event.target.value)}
+                      />
+                    </div>
+                    <div className="field">
+                      <label>Treasury balance</label>
+                      <div className="fund-treasury-balance">{formatMoney(treasuryFundedUsdc)}</div>
+                    </div>
+                  </div>
+
+                  <div className="button-row">
+                    <button
+                      type="button"
+                      className="button button-primary"
+                      onClick={fundTreasury}
+                      disabled={!fundWallet || fundingInProgress}
+                    >
+                      <CircleDollarSign size={16} />
+                      {fundingInProgress ? "Funding..." : "Fund treasury"}
+                    </button>
+                    {treasuryFundedUsdc > 0 ? <span className="chip chip-emerald">funded</span> : null}
+                  </div>
+
+                  {fundTxHash ? (
+                    <p className="hint fund-tx-hint">
+                      Tx: <span className="mono">{truncateAddress(fundTxHash)}</span>
+                      {onchainToggle && fundWallet?.kind === "real" ? (
+                        <a
+                          href={`${treasuryInfo?.explorerBase ?? "https://sepolia.basescan.org"}/tx/${fundTxHash}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          View on Basescan
+                          <ExternalLink size={12} />
+                        </a>
+                      ) : (
+                        <span className="chip">simulated</span>
+                      )}
+                    </p>
+                  ) : null}
+                </div>
+
+                <aside className="studio-preview-column">
+                  <div className="fund-treasury-card">
+                    <div className="studio-inline-head">
+                      <span className="eyebrow">Treasury</span>
+                      <span className={treasuryInfo?.onchainAvailable ? "chip chip-emerald" : "chip"}>
+                        {treasuryInfo?.onchainAvailable ? "on-chain ready" : "emulated only"}
+                      </span>
+                    </div>
+                    <div className="fund-treasury-row">
+                      <span>Treasury address</span>
+                      <strong className="mono">{treasuryInfo?.treasuryAddress ? truncateAddress(treasuryInfo.treasuryAddress) : "not configured"}</strong>
+                    </div>
+                    <div className="fund-treasury-row">
+                      <span>USDC contract</span>
+                      <strong className="mono">{treasuryInfo?.usdcAddress ? truncateAddress(treasuryInfo.usdcAddress) : "not configured"}</strong>
+                    </div>
+                    <div className="fund-treasury-row">
+                      <span>Chain</span>
+                      <strong>Base Sepolia ({treasuryInfo?.chainId ?? 84532})</strong>
+                    </div>
+                    <div className="fund-treasury-row">
+                      <span>Funded balance</span>
+                      <strong>{formatMoney(treasuryFundedUsdc)}</strong>
+                    </div>
+                    <div className="fund-treasury-row">
+                      <span>Spent so far</span>
+                      <strong>{formatMoney(totalSpentToShow)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="studio-roster">
+                    <div className="studio-info-row">
+                      <span className="eyebrow">Mode for launch</span>
+                      <span className={onchainToggle ? "chip chip-cyan" : "chip"}>{draft.mode}</span>
+                    </div>
+                    <p className="hint">
+                      The launch stage sends this draft mode to the server: <strong>onchain-single</strong> when Go
+                      on-chain is toggled on with a real wallet connected, otherwise <strong>mock</strong>.
+                    </p>
+                  </div>
+                </aside>
+              </div>
+            </div>
+          </section>
+
           <section
             ref={(node) => {
               sectionRefs.current.brief = node;
@@ -1361,7 +1753,15 @@ export function CampaignStudio({ initialMode }: Props) {
               </div>
               <div className="button-row">
                 {launchError ? <span className="chip chip-rose">{launchError}</span> : null}
-                <span className={launchReady ? "chip chip-emerald" : "chip"}>{launchReady ? "launch ready" : budgetCheck ? "review needed" : "waiting"}</span>
+                <span className={launchReady ? "chip chip-emerald" : "chip"}>
+                  {launchReady
+                    ? treasuryFundedUsdc > 0
+                      ? "launch ready — treasury funded"
+                      : "launch ready — treasury unfunded"
+                    : budgetCheck
+                      ? "review needed"
+                      : "waiting"}
+                </span>
                 <button type="button" className="button button-primary" onClick={launchCampaign} disabled={!launchReady}>
                   <Play size={16} />
                   {running ? "Launching..." : "Launch campaign"}

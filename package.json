@@ -2,7 +2,9 @@
   "name": "adnodes",
   "private": true,
   "version": "0.1.0",
-  "packageManager": "pnpm@11.0.0-beta.2",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "pnpm exec next dev",
     "build": "pnpm exec next build",
