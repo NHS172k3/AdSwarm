@@ -1,6 +1,8 @@
-﻿# AdNodes
+﻿# AdSwarm
 
-AdNodes is a hackathon demo for an AI-native ad agency. A client enters a campaign brief, the agent team negotiates fees, generates creative, simulates payroll and media buys, and produces an audit trail with optional on-chain USDC payments on Base Sepolia.
+AdSwarm is a hackathon demo for an AI-native ad agency. A client enters a campaign brief, the agent team negotiates fees, generates creative, simulates payroll and media buys, and produces an audit trail with optional on-chain USDC payments on Base Sepolia.
+
+## NOTE: THE VIDEO GENERATION MIGHT TAKE A WHILE AS IT IS A SMALL MODEL I AM USING TO SAVE COSTS, PLEASE BEAR WITH ME.
 
 ## Stack
 
