@@ -225,12 +225,14 @@ function escapeXml(value: string): string {
 
 function buildCampaignVideoPrompt(draft: CampaignDraft, headline: string): string {
   return [
-    "Create a concise 4 second 16:9 paid social video ad.",
-    `Product brief: ${draft.brief}`,
-    `Audience: ${draft.audience}`,
-    `Headline: ${headline}`,
-    `CTA: ${draft.cta}`,
-    "Style: modern startup-quality product ad, strong first frame, readable product moment, no real people, no copyrighted characters, no logos unless provided.",
+    "Create a punchy, high-energy 4-second 16:9 paid social video advertisement with a cinematic, premium commercial look.",
+    `Product / campaign: ${draft.brief}.`,
+    `Target audience: ${draft.audience}.`,
+    `On-screen hook to evoke: ${headline}.`,
+    `Desired call-to-action feeling: ${draft.cta}.`,
+    "Structure: open on a bold, scroll-stopping hero shot of the product in the very first frame; add smooth dynamic camera motion (a subtle push-in or orbit) with satisfying product-focused beats; land on a clean, confident closing frame that leaves negative space for a CTA overlay.",
+    "Look and feel: modern startup-quality commercial, rich dramatic lighting, strong color contrast, crisp focus, glossy premium textures, and energetic pacing tuned to the audience.",
+    "Constraints: no real identifiable people, no copyrighted characters or mascots, no third-party brand logos, and do not render paragraphs of on-screen text or garbled lettering.",
   ].join(" ");
 }
 
