@@ -1,0 +1,3 @@
+{
+  "installCommand": "corepack prepare pnpm@9.15.9 --activate && pnpm install --frozen-lockfile --config.manage-package-manager-versions=false"
+}

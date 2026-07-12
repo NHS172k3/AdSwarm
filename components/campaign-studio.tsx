@@ -74,6 +74,7 @@ interface TreasuryInfo {
 
 const DEMO_WALLET_BALANCE_USDC = 100;
 const BASE_SEPOLIA_RPC_URL = "https://sepolia.base.org";
+const BASE_SEPOLIA_CHAIN_ID = `0x${baseSepolia.id.toString(16)}`;
 
 const VIDEO_POLL_INTERVAL_MS = 10_000;
 
@@ -198,6 +199,10 @@ function randomDemoAddress(): `0x${string}` {
 function randomFakeTxHash(): `0x${string}` {
   const bytes = Array.from({ length: 32 }, () => Math.floor(Math.random() * 256));
   return `0x${bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("")}` as `0x${string}`;
+}
+
+function isValidUsdcAmount(value: string): boolean {
+  return /^\d+(?:\.\d{1,6})?$/.test(value) && Number(value) > 0;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -513,7 +518,9 @@ export function CampaignStudio({ initialMode }: Props) {
   const projectedAdSpend = budgetCheck ? Math.max(0, budgetCheck.projectedAdSpendUsdc) : draft.budgetUsdc;
   const gaugePercent = draft.budgetUsdc > 0 ? Math.min(1, Math.max(0.06, totalSpentToShow / draft.budgetUsdc)) : 0.06;
   const currentPhase = running ? "running" : summary ? "completed" : plan ? "review" : "intake";
-  const launchReady = Boolean(plan && budgetCheck?.ok && !running);
+  const fundedForCampaign = treasuryFundedUsdc >= draft.budgetUsdc;
+  const onchainModeEnabled = Boolean(onchainToggle && fundWallet?.kind === "real" && treasuryInfo?.onchainAvailable);
+  const launchReady = Boolean(plan && budgetCheck?.ok && fundedForCampaign && !running);
   const acceptedCount = proposals.filter((proposal) => accepted[proposal.agent] !== false).length;
   const summaryReference = summary ?? latestRun?.summary ?? null;
   const stageOrder: StageId[] = ["fund", "brief", "review", "launch", "results"];
@@ -527,7 +534,7 @@ export function CampaignStudio({ initialMode }: Props) {
     brief: {
       label: "Brief",
       subtitle: "Capture the campaign ask",
-      unlocked: true,
+      unlocked: treasuryFundedUsdc > 0,
       ready: Boolean(plan),
     },
     review: {
@@ -569,8 +576,8 @@ export function CampaignStudio({ initialMode }: Props) {
   }, []);
 
   useEffect(() => {
-    setDraft((current) => ({ ...current, mode: onchainToggle ? "onchain-single" : "mock" }));
-  }, [onchainToggle]);
+    setDraft((current) => ({ ...current, mode: onchainModeEnabled ? "onchain-single" : "mock" }));
+  }, [onchainModeEnabled]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -705,6 +712,43 @@ export function CampaignStudio({ initialMode }: Props) {
     return Number(formatUnits(balance, 6));
   }
 
+  async function ensureBaseSepoliaNetwork() {
+    if (typeof window === "undefined" || !window.ethereum) {
+      throw new Error("No injected wallet found.");
+    }
+
+    const currentChainId = await window.ethereum.request({ method: "eth_chainId" });
+    if (currentChainId === BASE_SEPOLIA_CHAIN_ID) return;
+
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: BASE_SEPOLIA_CHAIN_ID }],
+      });
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === 4902) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [
+            {
+              chainId: BASE_SEPOLIA_CHAIN_ID,
+              chainName: "Base Sepolia",
+              nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+              rpcUrls: [BASE_SEPOLIA_RPC_URL],
+              blockExplorerUrls: ["https://sepolia.basescan.org"],
+            },
+          ],
+        });
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: BASE_SEPOLIA_CHAIN_ID }],
+        });
+        return;
+      }
+      throw error;
+    }
+  }
+
   async function connectRealWallet() {
     setFundError(null);
 
@@ -715,6 +759,7 @@ export function CampaignStudio({ initialMode }: Props) {
 
     setConnectingWallet(true);
     try {
+      await ensureBaseSepoliaNetwork();
       const walletClient = createWalletClient({
         chain: baseSepolia,
         transport: custom(window.ethereum),
@@ -745,17 +790,17 @@ export function CampaignStudio({ initialMode }: Props) {
       return;
     }
 
-    const amount = Number(fundAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setFundError("Enter a funding amount greater than zero.");
+    if (!isValidUsdcAmount(fundAmount)) {
+      setFundError("Enter a USDC amount with up to six decimal places.");
       return;
     }
+    const amount = Number(fundAmount);
     if (amount > fundWallet.balanceUsdc) {
       setFundError("Amount exceeds the connected wallet balance.");
       return;
     }
 
-    const useOnchain = onchainToggle && fundWallet.kind === "real";
+    const useOnchain = onchainModeEnabled;
 
     if (!useOnchain) {
       const fakeTxHash = randomFakeTxHash();
@@ -765,8 +810,8 @@ export function CampaignStudio({ initialMode }: Props) {
       return;
     }
 
-    if (!treasuryInfo?.treasuryAddress || !treasuryInfo?.usdcAddress) {
-      setFundError("Treasury address is not configured on the server yet.");
+    if (!treasuryInfo?.onchainAvailable || !treasuryInfo.treasuryAddress || !treasuryInfo.usdcAddress) {
+      setFundError("On-chain campaign settlement is not configured on the server yet.");
       return;
     }
     if (typeof window === "undefined" || !window.ethereum) {
@@ -776,6 +821,7 @@ export function CampaignStudio({ initialMode }: Props) {
 
     setFundingInProgress(true);
     try {
+      await ensureBaseSepoliaNetwork();
       const walletClient = createWalletClient({
         chain: baseSepolia,
         transport: custom(window.ethereum),
@@ -789,6 +835,18 @@ export function CampaignStudio({ initialMode }: Props) {
         args: [treasuryInfo.treasuryAddress, parseUnits(fundAmount, 6)],
       });
       setFundTxHash(hash);
+      const publicClient = createPublicClient({
+        chain: baseSepolia,
+        transport: http(BASE_SEPOLIA_RPC_URL),
+      });
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash,
+        confirmations: 1,
+        timeout: 120_000,
+      });
+      if (receipt.status !== "success") {
+        throw new Error("The USDC transfer was not confirmed.");
+      }
       setTreasuryFundedUsdc((current) => current + amount);
       const refreshedBalance = await readUsdcBalance(fundWallet.address);
       setFundWallet((current) => (current ? { ...current, balanceUsdc: refreshedBalance } : current));
@@ -802,6 +860,11 @@ export function CampaignStudio({ initialMode }: Props) {
   async function buildPlan() {
     setPlanError(null);
     setLaunchError(null);
+
+    if (!fundedForCampaign) {
+      setPlanError(`Fund the treasury with at least ${formatMoney(draft.budgetUsdc)} before building the plan.`);
+      return;
+    }
 
     try {
       const response = await fetch("/api/plan", {
@@ -887,6 +950,10 @@ export function CampaignStudio({ initialMode }: Props) {
 
   async function launchCampaign() {
     if (!plan || !budgetCheck?.ok) return;
+    if (!fundedForCampaign) {
+      setLaunchError(`Fund the treasury with at least ${formatMoney(draft.budgetUsdc)} before launch.`);
+      return;
+    }
 
     setRunning(true);
     setLaunchError(null);
@@ -1290,9 +1357,16 @@ export function CampaignStudio({ initialMode }: Props) {
                         type="button"
                         className="toggle"
                         data-active={onchainToggle}
-                        onClick={() => setOnchainToggle((current) => !current)}
+                        onClick={() => {
+                          if (!onchainToggle && !treasuryInfo?.onchainAvailable) {
+                            setFundError("Configure the server treasury before enabling on-chain settlement.");
+                            return;
+                          }
+                          setFundError(null);
+                          setOnchainToggle((current) => !current);
+                        }}
                       >
-                        {onchainToggle ? "On-chain (real)" : "Emulated"}
+                        {onchainModeEnabled ? "On-chain (real)" : onchainToggle ? "Connect a real wallet" : "Emulated"}
                       </button>
                     </div>
                     <p className="hint">
@@ -1395,7 +1469,7 @@ export function CampaignStudio({ initialMode }: Props) {
                     </div>
                     <p className="hint">
                       The launch stage sends this draft mode to the server: <strong>onchain-single</strong> when Go
-                      on-chain is toggled on with a real wallet connected, otherwise <strong>mock</strong>.
+                      on-chain is toggled on with a real wallet and a ready server treasury, otherwise <strong>mock</strong>.
                     </p>
                   </div>
                 </aside>
