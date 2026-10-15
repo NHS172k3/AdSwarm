@@ -1,32 +1,64 @@
-﻿# AdSwarm
+# AdSwarm
 
-AdSwarm is a hackathon demo for an AI-native ad agency. A client enters a campaign brief, the agent team negotiates fees, generates creative, simulates payroll and media buys, and produces an audit trail with optional on-chain USDC payments on Base Sepolia.
+AdSwarm is a hackathon-ready demo of an AI-native ad agency. A campaign brief enters an agent workflow that plans strategy, negotiates fees, generates creative assets, simulates media execution, and records an auditable run history.
 
-## NOTE: THE VIDEO GENERATION MIGHT TAKE A WHILE AS IT IS A SMALL MODEL I AM USING TO SAVE COSTS, PLEASE BEAR WITH ME.
+The product is designed to be demo-safe by default:
+- **`PAYMENT_MODE=mock`** provides a complete end-to-end flow with no chain credentials.
+- Optional integrations (OpenAI, Supabase, on-chain USDC) enhance output quality and persistence without blocking the run when unavailable.
 
-## Stack
+## Highlights
+
+- Multi-agent campaign planning with proposal acceptance/rejection controls
+- Live launch stream with:
+  - payment tape
+  - budget checks/gauge behavior
+  - creative generation events
+  - placement/publisher events
+  - final campaign summary
+- Optional OpenAI-powered image and experimental video generation
+- Optional Supabase audit persistence
+- Optional Base Sepolia USDC transfer path (`onchain-single` mode)
+- In-memory audit/run history fallback to keep demos reliable
+
+## Tech Stack
 
 - Next.js 15
 - React 19
 - TypeScript
-- OpenAI API
-- Supabase for optional audit persistence
-- `viem` for Base Sepolia USDC transfers
+- OpenAI API (optional)
+- Supabase (optional)
+- viem (optional on-chain payments)
 
-## What works now
+## Prerequisites
 
-- Campaign planning flow with agent proposals
-- Accept/reject controls per agent
-- Live launch stream with budget checks, fee payments, OpenAI image generation, placement events, and summary
-- Mock mode for a full demo without chain dependencies
-- On-chain single-treasury mode scaffolded through Base Sepolia USDC envs
-- Audit API and local in-memory run history
+- Node.js 20+
+- pnpm
 
-## Environment
+## Quick Start
 
-Copy `.env.example` to `.env.local` and fill what you have.
+1. Install dependencies:
 
-Required for the core app:
+   ```bash
+   pnpm install
+   ```
+
+2. Copy environment variables:
+
+   ```bash
+   cp .env.example .env.local
+   ```
+
+3. Start the app:
+
+   ```bash
+   pnpm dev
+   ```
+
+4. Open http://127.0.0.1:3000
+
+## Environment Configuration
+
+### Core (recommended for all runs)
 
 ```env
 OPENAI_API_KEY=...
@@ -36,14 +68,18 @@ OPENAI_IMAGE_QUALITY=low
 PAYMENT_MODE=mock
 ```
 
-Optional Supabase:
+> `OPENAI_API_KEY` is optional for app availability. If omitted or unavailable, AdSwarm falls back to deterministic local behaviors so launch still completes.
+
+### Optional: Supabase Audit Persistence
 
 ```env
 SUPABASE_URL=...
 SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-Optional on-chain demo mode:
+If unset, audit history remains available through in-memory/local fallback behavior.
+
+### Optional: On-Chain Payments (Base Sepolia)
 
 ```env
 PAYMENT_MODE=onchain-single
@@ -53,144 +89,50 @@ RPC_URL=https://base-sepolia.g.alchemy.com/v2/...
 USDC_ADDRESS=0x...
 ```
 
-See `.env.example` for the full template.
+If chain execution fails, keep `PAYMENT_MODE=mock` for demo continuity.
 
-## Install
+## Scripts
 
-```bash
-pnpm install
-```
+- `pnpm dev` — start local development server
+- `pnpm typecheck` — run TypeScript checks
+- `pnpm build` — create production build
+- `pnpm check` — run typecheck + production build
+- `pnpm start` — start production server (after `pnpm build`)
 
-## Run locally
-
-Start the dev server:
-
-```bash
-pnpm dev
-```
-
-Open:
-
-```text
-http://127.0.0.1:3000
-```
-
-Validation:
-
-```bash
-pnpm typecheck
-```
-
-Production build:
-
-```bash
-pnpm build
-```
-
-Combined validation plus production build:
-
-```bash
-pnpm check
-```
-
-Serve the production build:
-
-```bash
-pnpm start
-```
-
-## Demo flow
+## Demo Flow
 
 1. Open the app.
-2. Enter a product brief, audience, CTA, and budget.
-3. Click `Plan campaign`.
-4. Keep all agents accepted for the full demo path.
-5. Click `Launch campaign`.
-6. Watch the payment tape, OpenAI image generation, placements, and final summary.
+2. Enter campaign inputs (brief, audience, CTA, budget).
+3. Click **Plan campaign**.
+4. Accept desired agent proposals (accept all for full-path demo).
+5. Click **Launch campaign**.
+6. Observe the transaction tape, budget movement, creative events, publisher placements, and final summary.
 
-## Creative generation
+## API Routes
 
-Static ad images are generated with OpenAI when `OPENAI_API_KEY` is present. If OpenAI image generation is unavailable, the launch stream falls back to a local SVG creative so the demo still completes.
+- `POST /api/plan` — generate campaign plan/proposals
+- `POST /api/launch` — run launch stream and payment/media simulation
+- `GET /api/audit` — inspect stored audit runs
+- `GET /api/runs?runId=...` — inspect a specific run
+- `GET /api/publishers?slotId=...&proof=...` — resolve publisher slot
+- `POST|GET /api/experimental/video` — create, poll, or download experimental OpenAI video jobs
 
-Video is intentionally non-blocking. When video is enabled in the campaign and `OPENAI_EXPERIMENTAL_VIDEO_ENABLED=true`, launch creates an async OpenAI video job and emits a video artifact with `metadata.openaiVideoId`, `metadata.statusUrl`, and `metadata.downloadUrl`. Campaign launch still completes if the video API is unavailable.
+## Experimental Video
 
-For local testing, set this in `.env.local` and restart the dev server:
+Video generation is asynchronous and intentionally non-blocking.
+
+Enable with:
 
 ```env
 OPENAI_EXPERIMENTAL_VIDEO_ENABLED=true
 OPENAI_EXPERIMENTAL_VIDEO_MODEL=sora-2
 ```
 
-Experimental OpenAI video route:
+When enabled and selected in campaign configuration, launch emits a video artifact with metadata such as `openaiVideoId`, status URL, and download URL. If video APIs are unavailable, the broader campaign run still completes.
 
-```bash
-curl -X POST http://127.0.0.1:3000/api/experimental/video \
-  -H "Content-Type: application/json" \
-  -d "{\"prompt\":\"A short energetic product ad for a gaming energy drink\",\"model\":\"sora-2\"}"
-```
+## Security and Operations Notes
 
-This route is disabled unless `OPENAI_EXPERIMENTAL_VIDEO_ENABLED=true` is set.
+- Keep secrets in `.env.local` only (never commit credentials).
+- Use `mock` mode for the most reliable demos.
+- Keep on-chain mode as an optional enhancement, not a dependency for core flows.
 
-For the main app flow, turn on `Video` in the campaign composer, launch the campaign, then inspect the emitted video artifact in the UI or via `/api/runs?runId=...`.
-
-Poll status:
-
-```bash
-curl "http://127.0.0.1:3000/api/experimental/video?videoId=video_123"
-```
-
-Download the finished MP4 through the same isolated route:
-
-```bash
-curl -L "http://127.0.0.1:3000/api/experimental/video?videoId=video_123&download=1"
-```
-
-## On-chain mode
-
-Set:
-
-```env
-PAYMENT_MODE=onchain-single
-```
-
-Then provide:
-
-- `TREASURY_PRIVATE_KEY`
-- `TREASURY_ADDRESS`
-- `RPC_URL`
-- `USDC_ADDRESS`
-
-This mode sends USDC transfers from the treasury wallet on Base Sepolia and links each tx to Basescan.
-
-## Useful routes
-
-- `/` main app
-- `/api/plan` plan a campaign
-- `/api/launch` launch a campaign stream
-- `/api/audit` inspect stored local runs
-- `/api/runs?runId=...` inspect a specific run
-- `/api/publishers?slotId=...&proof=...` unlock a publisher slot
-- `/api/experimental/video` create, poll, or download experimental OpenAI video jobs
-
-## Checks already run
-
-These passed locally:
-
-```bash
-pnpm typecheck
-pnpm build
-```
-
-I also smoke-tested:
-
-- `GET /`
-- `GET /api/audit`
-- `POST /api/plan`
-- `POST /api/launch`
-
-## Notes
-
-- `mock` mode is the safest demo default.
-- Supabase is optional right now; the app still works without it.
-- Keep secret keys in `.env.local` only.
-- Use `pnpm`, not `npm`, for this repo.
